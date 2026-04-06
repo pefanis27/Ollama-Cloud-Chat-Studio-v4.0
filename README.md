@@ -1,4 +1,4 @@
-# Ollama Cloud Chat Studio v4.0
+# Ollama Cloud Chat Studio v4.0 (update)
 
 Η εφαρμογή Ollama Cloud Chat Studio v4.0 είναι ένα ολοκληρωμένο, browser-based περιβάλλον συνομιλίας που έχει σχεδιαστεί για τη διασύνδεση με το Ollama Cloud, προσφέροντας εξειδικευμένες δυνατότητες για προγραμματιστές και επιστήμονες.
 
