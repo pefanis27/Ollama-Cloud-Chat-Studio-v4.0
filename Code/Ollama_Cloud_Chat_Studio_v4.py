@@ -4403,120 +4403,6 @@ def _repair_single_var_list_unpack(code_text: str) -> str:
     )
     return pattern.sub(r'\1\2 =', code_text)
 
-
-def _auto_close_unbalanced_python_delimiters(code_text: str) -> str:
-    """Κλείνει heuristically ανοιχτά (), [], {}, καθώς και απλά/triple quotes στο EOF.
-
-    Δεν ανακατασκευάζει χαμένο περιεχόμενο· απλώς προσθέτει τους ελάχιστους
-    κλείνοντες χαρακτήρες ώστε να αποφευχθεί άμεσο SyntaxError όταν το LLM
-    ξέχασε τα τελευταία closers του block.
-    """
-    text = str(code_text or '')
-    if not text:
-        return text
-    stack: List[str] = []
-    in_single = False
-    in_double = False
-    in_triple_single = False
-    in_triple_double = False
-    escaped = False
-    i = 0
-    n = len(text)
-    while i < n:
-        ch = text[i]
-        nxt3 = text[i:i + 3]
-        if in_triple_single:
-            if nxt3 == "'''":
-                in_triple_single = False
-                i += 3
-                continue
-            i += 1
-            continue
-        if in_triple_double:
-            if nxt3 == '"""':
-                in_triple_double = False
-                i += 3
-                continue
-            i += 1
-            continue
-        if in_single:
-            if escaped:
-                escaped = False
-            elif ch == '\\':
-                escaped = True
-            elif ch == "'":
-                in_single = False
-            i += 1
-            continue
-        if in_double:
-            if escaped:
-                escaped = False
-            elif ch == '\\':
-                escaped = True
-            elif ch == '"':
-                in_double = False
-            i += 1
-            continue
-        if ch == '#':
-            nl = text.find('\n', i)
-            if nl == -1:
-                break
-            i = nl + 1
-            continue
-        if nxt3 == "'''":
-            in_triple_single = True
-            i += 3
-            continue
-        if nxt3 == '"""':
-            in_triple_double = True
-            i += 3
-            continue
-        if ch == "'":
-            in_single = True
-            i += 1
-            continue
-        if ch == '"':
-            in_double = True
-            i += 1
-            continue
-        if ch in '([{':
-            stack.append(ch)
-        elif ch in ')]}':
-            if stack:
-                top = stack[-1]
-                if (top, ch) in {('(', ')'), ('[', ']'), ('{', '}')}:
-                    stack.pop()
-        i += 1
-    closers: List[str] = []
-    if in_triple_single:
-        closers.append("'''")
-    elif in_triple_double:
-        closers.append('"""')
-    elif in_single:
-        closers.append("'")
-    elif in_double:
-        closers.append('"')
-    mapping = {'(': ')', '[': ']', '{': '}'}
-    while stack:
-        closers.append(mapping.get(stack.pop(), ''))
-    suffix = ''.join(filter(None, closers))
-    if not suffix:
-        return text
-    if text.endswith('\n'):
-        return text + suffix
-    return text + '\n' + suffix
-
-
-def _syntax_error_looks_truncated(exc: SyntaxError) -> bool:
-    """Εντοπίζει αν το SyntaxError μοιάζει με EOF/truncation του code block."""
-    msg = str(getattr(exc, 'msg', '') or '').lower()
-    return (
-        'was never closed' in msg
-        or 'unterminated' in msg
-        or 'eof while scanning' in msg
-        or 'unexpected eof' in msg
-    )
-
 def repair_python_plot_code(code_text: str) -> str:
     """Εφαρμόζει ασφαλή heuristic repairs σε plotting code που παράχθηκε από LLM ώστε να γίνει πιο ανθεκτικό στο render."""
     repaired = _strip_python_code_fences(str(code_text or ''))
@@ -4527,7 +4413,6 @@ def repair_python_plot_code(code_text: str) -> str:
     repaired = _comment_suspicious_plaintext_lines(repaired)
     repaired = _repair_non_ascii_fstring_placeholders(repaired)
     repaired = _repair_single_var_list_unpack(repaired)
-    repaired = _auto_close_unbalanced_python_delimiters(repaired)
     try:
         tokens = []
         stream = io.StringIO(repaired)
@@ -4610,37 +4495,6 @@ def render_python_plot_to_generated_media(code_text: str, suggested_filename: st
         safe_name += '.py'
     script_path = session_dir / safe_name
     script_path.write_text(code_text, encoding='utf-8', newline='\n')
-    try:
-        exact_source = script_path.read_text(encoding='utf-8')
-    except Exception as exc:
-        shutil.rmtree(session_dir, ignore_errors=True)
-        return (False, f'Αποτυχία επαλήθευσης του plotting script μετά την αποθήκευση: {exc}', None)
-    is_valid_exact, validation_message_exact = validate_python_code_block(exact_source)
-    if not is_valid_exact:
-        shutil.rmtree(session_dir, ignore_errors=True)
-        return (False, f'Το plotting script έχει συντακτικό σφάλμα και δεν μπορεί να αποδοθεί.\n{validation_message_exact}', None)
-    try:
-        compile(exact_source, str(script_path), 'exec')
-    except SyntaxError as exc:
-        line_no = getattr(exc, 'lineno', None) or 0
-        offset = getattr(exc, 'offset', None) or 0
-        bad_line = ''
-        exact_lines = exact_source.splitlines()
-        if 1 <= line_no <= len(exact_lines):
-            bad_line = exact_lines[line_no - 1]
-        pointer = ' ' * max(offset - 1, 0) + '^' if offset else ''
-        details = [f'Το plotting script έχει συντακτικό σφάλμα και δεν μπορεί να αποδοθεί.', f'SyntaxError στη γραμμή {line_no}: {exc.msg}']
-        if _syntax_error_looks_truncated(exc):
-            details.append('Το code φαίνεται ατελές ή κομμένο πριν ολοκληρωθούν λίστες, παρενθέσεις, dict ή strings.')
-        if bad_line:
-            details.append(bad_line)
-        if pointer:
-            details.append(pointer)
-        shutil.rmtree(session_dir, ignore_errors=True)
-        return (False, '\n'.join(details), None)
-    except Exception as exc:
-        shutil.rmtree(session_dir, ignore_errors=True)
-        return (False, f'Αποτυχία compile του plotting script πριν το render: {exc}', None)
     output_path = session_dir / ((Path(safe_name).stem or 'generated_plot') + '.png')
     runner_path = session_dir / '_plot_runner.py'
     runner_code = r"""import builtins
@@ -4687,26 +4541,6 @@ def _emit_json(payload):
         pass
 
 plt.show = _patched_show
-
-
-def _find_existing_output_file(preferred_path):
-    try:
-        candidates = []
-        preferred_dir = os.path.dirname(preferred_path) or os.getcwd()
-        for name in os.listdir(preferred_dir):
-            candidate = os.path.join(preferred_dir, name)
-            if not os.path.isfile(candidate):
-                continue
-            lower = name.lower()
-            if lower.endswith(('.png', '.jpg', '.jpeg', '.svg', '.webp')) and os.path.getsize(candidate) > 0:
-                candidates.append(candidate)
-        if not candidates:
-            return ''
-        candidates.sort(key=lambda path: (0 if os.path.abspath(path) == os.path.abspath(preferred_path) else 1, -os.path.getmtime(path)))
-        return candidates[0]
-    except Exception:
-        return ''
-
 
 # -- Matplotlib mathtext sanitizer ------------------------------------------
 # Στρατηγική: ΥΒΡΙΔΙΚΗ (blacklist + whitelist)
@@ -5093,16 +4927,11 @@ try:
         source = handle.read()
     exec(compile(source, INPUT_PATH, 'exec'), namespace, namespace)
     if not os.path.exists(OUTPUT_PATH):
-        existing_output = _find_existing_output_file(OUTPUT_PATH)
-        if existing_output and os.path.abspath(existing_output) != os.path.abspath(OUTPUT_PATH):
-            import shutil as _shutil
-            _shutil.copy2(existing_output, OUTPUT_PATH)
-    if not os.path.exists(OUTPUT_PATH):
         figures = [plt.figure(num) for num in plt.get_fignums()]
         if figures:
             figures[-1].savefig(OUTPUT_PATH, dpi=170, bbox_inches='tight')
     if not os.path.exists(OUTPUT_PATH):
-        raise RuntimeError('Το plotting script ολοκληρώθηκε αλλά δεν παρήγαγε matplotlib figure ή αποθηκευμένο image output.')
+        raise RuntimeError('Το plotting script ολοκληρώθηκε αλλά δεν παρήγαγε matplotlib figure.')
     _emit_json({'ok': True, 'output_path': OUTPUT_PATH})
 except Exception as exc:
     _emit_json({'ok': False, 'error': str(exc), 'traceback': traceback.format_exc(limit=6)})
@@ -5136,16 +4965,8 @@ except Exception as exc:
         return (False, f'Αποτυχία εκτέλεσης plot renderer μέσω {python_source}: {exc}', None)
     stdout_text = str(proc.stdout or '').strip()
     stderr_text = str(proc.stderr or '').strip()
-    cleaned_stdout = '\n'.join(line for line in stdout_text.splitlines() if 'Matplotlib is building the font cache' not in line).strip()
-    cleaned_stderr = '\n'.join(line for line in stderr_text.splitlines() if 'Matplotlib is building the font cache' not in line).strip()
     if proc.returncode != 0 or (not output_path.exists()):
-        combined_details = '\n'.join(part for part in [cleaned_stderr, cleaned_stdout] if part).strip()
-        traceback_marker = 'Traceback (most recent call last):'
-        if traceback_marker in combined_details:
-            combined_details = combined_details[combined_details.find(traceback_marker):]
-        details = (combined_details or cleaned_stderr or cleaned_stdout or 'Το plotting script δεν παρήγαγε έγκυρο αποτέλεσμα.')[:PLOT_RENDER_MAX_STDOUT_CHARS]
-        if 'δεν παρήγαγε matplotlib figure' in details.lower() or 'did not produce matplotlib figure' in details.lower():
-            details += '\nΠιθανές αιτίες: το code δεν περιείχε τελικά εντολές plotting, έκλεισε όλα τα figures πριν το τέλος ή αποθήκευσε εικόνα σε μη αναμενόμενο path.'
+        details = (stderr_text or stdout_text or 'Το plotting script δεν παρήγαγε έγκυρο αποτέλεσμα.')[:PLOT_RENDER_MAX_STDOUT_CHARS]
         shutil.rmtree(session_dir, ignore_errors=True)
         return (False, details, None)
     try:
@@ -7484,10 +7305,10 @@ def serve_index_html() -> str:
       if (!source) return false;
       // Fast checks — math delimiters ($...$ και display math)
       if (source.indexOf("$") !== -1) return true;
-      if (source.indexOf("\\\\[") !== -1 || source.indexOf("\\\\(") !== -1) return true;
+      if (source.indexOf("\\[") !== -1 || source.indexOf("\\(") !== -1) return true;
       // Έλεγχος για LaTeX commands από όλα τα πεδία επιστημών:
       // Μαθηματικά, Φυσική, Χημεία, Βιολογία/Βιοχημεία, Ηλεκτρονική κ.λπ.
-      return /\\\\(?:frac|dfrac|tfrac|cfrac|sfrac|sqrt|binom|tbinom|dbinom|over|atop|choose|sum|prod|int|iint|iiint|oint|coprod|lim|liminf|limsup|sup|inf|max|min|det|deg|exp|log|ln|sin|cos|tan|cot|sec|csc|arcsin|arccos|arctan|sinh|cosh|tanh|alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta|iota|kappa|lambda|mu|nu|xi|pi|varpi|rho|varrho|sigma|varsigma|tau|upsilon|phi|varphi|chi|psi|omega|Gamma|Delta|Theta|Lambda|Xi|Pi|Sigma|Upsilon|Phi|Psi|Omega|partial|nabla|infty|forall|exists|nexists|emptyset|varnothing|times|cdot|pm|mp|div|ast|star|circ|bullet|oplus|ominus|otimes|odot|cap|cup|vee|wedge|setminus|subset|supset|subseteq|supseteq|notin|in|ni|leq|geq|neq|approx|equiv|propto|sim|simeq|prec|succ|ll|gg|perp|parallel|cong|asymp|rightarrow|leftarrow|leftrightarrow|Rightarrow|Leftarrow|Leftrightarrow|to|mapsto|implies|iff|longrightarrow|longleftarrow|uparrow|downarrow|therefore|because|angle|triangle|square|vec|hat|bar|dot|ddot|dddot|tilde|acute|grave|breve|check|widehat|widetilde|overline|underline|overbrace|underbrace|overset|underset|stackrel|overleftarrow|overrightarrow|overleftrightarrow|mathrm|mathit|mathbf|mathtt|mathsf|mathcal|mathbb|mathscr|mathfrak|boldsymbol|bm|textbf|textit|textrm|emph|ce|cee|cf|bra|ket|braket|ketbra|mel|ev|comm|acomm|pdv|dv|fdv|grad|curl|div|laplacian|divergence|abs|norm|eval|order|tr|Tr|rank|erf|si|SI|qty|unit|num|ang|pu|mol|begin|end|left|right|big|bigg|Big|Bigg|hbar|ell|wp|Re|Im|aleph|beth|daleth|gimel|deg|ohm|text|mbox|operatorname|cancel|bcancel|xcancel|cancelto|boxed|color|textcolor)\\b/.test(source);
+      return /\\(?:frac|dfrac|tfrac|cfrac|sfrac|sqrt|binom|tbinom|dbinom|over|atop|choose|sum|prod|int|iint|iiint|oint|coprod|lim|liminf|limsup|sup|inf|max|min|det|deg|exp|log|ln|sin|cos|tan|cot|sec|csc|arcsin|arccos|arctan|sinh|cosh|tanh|alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta|iota|kappa|lambda|mu|nu|xi|pi|varpi|rho|varrho|sigma|varsigma|tau|upsilon|phi|varphi|chi|psi|omega|Gamma|Delta|Theta|Lambda|Xi|Pi|Sigma|Upsilon|Phi|Psi|Omega|partial|nabla|infty|forall|exists|nexists|emptyset|varnothing|times|cdot|pm|mp|div|ast|star|circ|bullet|oplus|ominus|otimes|odot|cap|cup|vee|wedge|setminus|subset|supset|subseteq|supseteq|notin|in|ni|leq|geq|neq|approx|equiv|propto|sim|simeq|prec|succ|ll|gg|perp|parallel|cong|asymp|rightarrow|leftarrow|leftrightarrow|Rightarrow|Leftarrow|Leftrightarrow|to|mapsto|implies|iff|longrightarrow|longleftarrow|uparrow|downarrow|therefore|because|angle|triangle|square|vec|hat|bar|dot|ddot|dddot|tilde|acute|grave|breve|check|widehat|widetilde|overline|underline|overbrace|underbrace|overset|underset|stackrel|overleftarrow|overrightarrow|overleftrightarrow|mathrm|mathit|mathbf|mathtt|mathsf|mathcal|mathbb|mathscr|mathfrak|boldsymbol|bm|textbf|textit|textrm|emph|ce|cee|cf|bra|ket|braket|ketbra|mel|ev|comm|acomm|pdv|dv|fdv|grad|curl|div|laplacian|divergence|abs|norm|eval|order|tr|Tr|rank|erf|si|SI|qty|unit|num|ang|pu|mol|begin|end|left|right|big|bigg|Big|Bigg|hbar|ell|wp|Re|Im|aleph|beth|daleth|gimel|deg|ohm|text|mbox|operatorname|cancel|bcancel|xcancel|cancelto|boxed|color|textcolor)\b/.test(source);
     }
 
     function renderMathInElementSafe(root) {
@@ -8064,7 +7885,7 @@ def serve_index_html() -> str:
       if (!source || source.indexOf("<svg") === -1 || source.indexOf("</svg>") === -1) return [source];
 
       const parts = [];
-      const regex = /<svg\\b[\\s\\S]*?<\\/svg>/ig;
+      const regex = /<svg\b[\\s\\S]*?<\\/svg>/ig;
       let lastIndex = 0;
       let match;
       while ((match = regex.exec(source)) !== null) {
@@ -11205,7 +11026,7 @@ def _patch_svg_preview_in_index_html(html_doc: str) -> str:
     helper_insert = r'''    function looksLikeSvgContent(text) {
       const source = String(text || "").trim();
       if (!source) return false;
-      return /^<svg\\b[\s\S]*<\/svg>$/i.test(source);
+      return /^<svg\b[\s\S]*<\/svg>$/i.test(source);
     }
 
     function isSvgLanguage(language) {
@@ -11513,7 +11334,7 @@ def _patch_svg_preview_in_index_html(html_doc: str) -> str:
       if (!source || source.indexOf("<svg") === -1 || source.indexOf("</svg>") === -1) return [source];
 
       const parts = [];
-      const regex = /<svg\\b[\s\S]*?<\/svg>/ig;
+      const regex = /<svg\b[\s\S]*?<\/svg>/ig;
       let lastIndex = 0;
       let match;
       while ((match = regex.exec(source)) !== null) {
@@ -14188,6 +14009,7 @@ def _build_assistant_pdf_document(html_fragment: str, theme: str='light', docume
 
     return html_doc
 
+# main() μετακινήθηκε στο πραγματικό τέλος του αρχείου, ώστε να εφαρμοστούν πρώτα όλα τα runtime patches του HTML/UI.
 
 
 _previous_serve_index_html_with_svg_force_runtime = serve_index_html
@@ -14207,7 +14029,7 @@ def _patch_svg_force_runtime_in_index_html(html_doc: str) -> str:
 
   function looksLikeSvgContent(text) {
     const source = String(text || '').trim();
-    return /^<svg\\b[\s\S]*<\/svg>$/i.test(source);
+    return /^<svg\b[\s\S]*<\/svg>$/i.test(source);
   }
 
   function isSvgLanguage(language) {
@@ -14528,7 +14350,7 @@ def _patch_svg_force_runtime_in_index_html(html_doc: str) -> str:
     if (!source || source.indexOf('<svg') === -1 || source.indexOf('</svg>') === -1) return [source];
 
     const parts = [];
-    const regex = /<svg\\b[\s\S]*?<\/svg>/ig;
+    const regex = /<svg\b[\s\S]*?<\/svg>/ig;
     let lastIndex = 0;
     let match;
     while ((match = regex.exec(source)) !== null) {
@@ -14674,8 +14496,484 @@ def _patch_svg_force_runtime_in_index_html(html_doc: str) -> str:
 
 def serve_index_html() -> str:
     """Τελικό index HTML με αναγκαστικό runtime SVG preview fix."""
-    html_doc = _patch_svg_force_runtime_in_index_html(_previous_serve_index_html_with_svg_force_runtime())
-    return html_doc.replace("\x08", r"\b")
+    return _patch_svg_force_runtime_in_index_html(_previous_serve_index_html_with_svg_force_runtime())
+
+
+
+def _patch_stable_live_scientific_streaming_in_index_html(html_doc: str) -> str:
+    """Προσθέτει atomic/offscreen live scientific rendering ώστε τα σύμβολα να μένουν σταθερά στο streaming."""
+    html_doc = str(html_doc or '')
+    if not html_doc:
+        return html_doc
+    if 'stable-live-scientific-streaming-patch-v1' in html_doc:
+        return html_doc
+
+    runtime_script = r"""
+<script id="stable-live-scientific-streaming-patch-v1">
+(function () {
+  function installPatch() {
+    if (window.__stableLiveScientificStreamingPatchInstalled) return;
+    window.__stableLiveScientificStreamingPatchInstalled = true;
+
+    if (!document.getElementById('stable-live-scientific-streaming-style')) {
+      const style = document.createElement('style');
+      style.id = 'stable-live-scientific-streaming-style';
+      style.textContent = `
+.live-render-staging-host {
+  position: fixed;
+  left: -200vw;
+  top: 0;
+  width: min(1100px, 92vw);
+  visibility: hidden;
+  pointer-events: none;
+  opacity: 0;
+  z-index: -2147483647;
+  contain: layout style paint;
+}
+.msg-body .assistant-live-preview,
+.assistant-print-body .assistant-live-preview,
+.assistant-print-prompt-body .assistant-live-preview {
+  min-width: 0;
+}
+.msg-body .assistant-live-preview[data-stable-render-ready="1"] {
+  will-change: contents;
+}
+.msg-body .assistant-live-preview mjx-container,
+.msg-body .assistant-live-preview .katex,
+.msg-body .assistant-live-preview math {
+  text-rendering: geometricPrecision;
+  -webkit-font-smoothing: antialiased;
+  font-synthesis-weight: none;
+}
+      `.trim();
+      document.head.appendChild(style);
+    }
+
+    const stableStreamState = new WeakMap();
+
+    function getStableState(container) {
+      let entry = stableStreamState.get(container);
+      if (!entry) {
+        entry = {
+          version: 0,
+          timer: 0,
+          inFlight: false,
+          lastSwapText: '',
+          pendingText: '',
+          lastRequestTs: 0,
+        };
+        stableStreamState.set(container, entry);
+      }
+      return entry;
+    }
+
+    function getStagingHost() {
+      let host = document.getElementById('liveRenderStagingHost');
+      if (!host) {
+        host = document.createElement('div');
+        host.id = 'liveRenderStagingHost';
+        host.className = 'live-render-staging-host';
+        (document.body || document.documentElement).appendChild(host);
+      }
+      return host;
+    }
+
+    function countMatches(text, pattern) {
+      const m = String(text || '').match(pattern);
+      return m ? m.length : 0;
+    }
+
+    function hasLikelyIncompleteScientificMarkup(sourceText) {
+      const text = String(sourceText || '');
+      if (!text) return false;
+      const withoutEscapedDollars = text.replace(/\\\$/g, '');
+      const doubleDollarCount = countMatches(withoutEscapedDollars, /\$\$/g);
+      const singleDollarRemainder = withoutEscapedDollars.replace(/\$\$/g, '');
+      const singleDollarCount = countMatches(singleDollarRemainder, /\$/g);
+      if ((doubleDollarCount % 2) !== 0) return true;
+      if ((singleDollarCount % 2) !== 0) return true;
+      if (countMatches(text, /\\\(/g) !== countMatches(text, /\\\)/g)) return true;
+      if (countMatches(text, /\\\[/g) !== countMatches(text, /\\\]/g)) return true;
+      const beginCount = countMatches(text, /\\begin\{[A-Za-z*]+\}/g);
+      const endCount = countMatches(text, /\\end\{[A-Za-z*]+\}/g);
+      if (beginCount != endCount) return true;
+      return false;
+    }
+
+    async function renderMathOffscreen(staging, sourceText) {
+      const hasScience = typeof window.mayContainScientificMarkup === 'function'
+        ? !!window.mayContainScientificMarkup(sourceText)
+        : false;
+      if (!hasScience) return true;
+      if (hasLikelyIncompleteScientificMarkup(sourceText)) return false;
+
+      if (window.MathJax && typeof window.MathJax.typesetPromise === 'function') {
+        try {
+          await window.MathJax.typesetPromise([staging]);
+          return true;
+        } catch (err) {
+          console.warn('Stable offscreen MathJax render failed:', err);
+          return false;
+        }
+      }
+
+      if (typeof window.renderMathInElement === 'function') {
+        try {
+          window.renderMathInElement(staging, {
+            delimiters: [
+              { left: '$$', right: '$$', display: true },
+              { left: '\\[', right: '\\]', display: true },
+              { left: '$', right: '$', display: false },
+              { left: '\\(', right: '\\)', display: false },
+            ],
+            throwOnError: false,
+            strict: 'ignore',
+            ignoredTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'],
+          });
+          return true;
+        } catch (err) {
+          console.warn('Stable offscreen KaTeX render failed:', err);
+          return false;
+        }
+      }
+      return false;
+    }
+
+    function moveChildren(source, target) {
+      const frag = document.createDocumentFragment();
+      while (source.firstChild) {
+        frag.appendChild(source.firstChild);
+      }
+      target.replaceChildren(frag);
+    }
+
+    async function buildStableStreamingPreview(container, sourceText, versionToken) {
+      const host = getStagingHost();
+      const staging = document.createElement('div');
+      staging.className = 'assistant-live-preview stable-render-staging';
+      staging.dataset.rawContent = String(sourceText || '');
+      host.appendChild(staging);
+
+      try {
+        if (typeof window.renderMessageContent === 'function') {
+          window.renderMessageContent(staging, sourceText, {
+            skipMathRender: true,
+            liveMathPreview: false,
+            forceStreamingPreview: true,
+          });
+        } else {
+          staging.textContent = String(sourceText || '');
+        }
+
+        await renderMathOffscreen(staging, sourceText);
+
+        const liveState = getStableState(container);
+        if ((liveState.version || 0) !== versionToken) return;
+
+        const previewNode = typeof window.ensureAssistantStreamingPreviewNode === 'function'
+          ? window.ensureAssistantStreamingPreviewNode(container)
+          : container;
+        if (!previewNode) return;
+
+        previewNode.dataset.rawContent = String(sourceText || '');
+        previewNode.dataset.stableRenderReady = '1';
+        moveChildren(staging, previewNode);
+
+        if (typeof window.schedulePrismHighlightInContainer === 'function') {
+          window.schedulePrismHighlightInContainer(previewNode);
+        }
+      } finally {
+        staging.remove();
+      }
+    }
+
+    function scheduleStableStreamingPreview(container, sourceText, options) {
+      if (!container) return String(sourceText || '');
+      const liveState = getStableState(container);
+      liveState.pendingText = String(sourceText || '');
+      liveState.version = ((liveState.version || 0) + 1) | 0;
+      const myVersion = liveState.version;
+      const now = Date.now();
+      const minInterval = Math.max(90, Number((options && options.liveMathIntervalMs) || 140));
+      const elapsed = now - Number(liveState.lastRequestTs || 0);
+      liveState.lastRequestTs = now;
+
+      if (liveState.timer) {
+        clearTimeout(liveState.timer);
+        liveState.timer = 0;
+      }
+
+      const delay = Math.max(0, minInterval - Math.min(elapsed, minInterval));
+      liveState.timer = window.setTimeout(() => {
+        liveState.timer = 0;
+        buildStableStreamingPreview(container, liveState.pendingText, myVersion).catch((err) => {
+          console.warn('Stable streaming preview failed:', err);
+        });
+      }, delay);
+      stableStreamState.set(container, liveState);
+      return liveState.pendingText;
+    }
+
+    window.updateAssistantStreamingPreview = function updateAssistantStreamingPreviewStable(container, content) {
+      const sourceText = String(content || '');
+      if (!container) return sourceText;
+      container.dataset.rawContent = sourceText;
+      scheduleStableStreamingPreview(container, sourceText, {
+        liveMathIntervalMs: 140,
+      });
+      return sourceText;
+    };
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', installPatch, { once: true });
+  } else {
+    installPatch();
+  }
+})();
+</script>
+"""
+    if '</body>' in html_doc:
+        html_doc = html_doc.replace('</body>', runtime_script + '\n</body>', 1)
+    else:
+        html_doc += runtime_script
+    return html_doc
+
+
+_previous_serve_index_html_live_scientific_streaming_fix = serve_index_html
+
+
+def serve_index_html() -> str:
+    """Τελικό index HTML με atomic/offscreen live scientific rendering στο streaming."""
+    return _patch_stable_live_scientific_streaming_in_index_html(_previous_serve_index_html_live_scientific_streaming_fix())
+
+
+_previous_serve_index_html_startup_escape_fix = serve_index_html
+
+def _patch_startup_and_js_escape_issues_in_index_html(html_doc: str) -> str:
+    """Τελικό safety patch για το startup UI.
+
+    Διορθώνει JS escape ακολουθίες που έσπαγαν το κύριο frontend script
+    πριν προλάβει να τρέξει το loadAppConfig/loadModels.
+    """
+    html_doc = str(html_doc or '')
+
+    # 1) Επιδιόρθωση control-char backspace που προέκυπτε από Python \b escapes.
+    if '\x08' in html_doc:
+        html_doc = html_doc.replace('\x08', r'\b')
+
+    # 2) Επιδιόρθωση JS string literals που πρέπει να ψάχνουν για κυριολεκτικό backslash.
+    html_doc = html_doc.replace(r'indexOf("\[")', r'indexOf("\\[")')
+    html_doc = html_doc.replace(r'indexOf("\(")', r'indexOf("\\(")')
+
+    # 3) Επιδιόρθωση regex literal για LaTeX commands.
+    html_doc = html_doc.replace(r'return /\(?:', r'return /\\(?:')
+
+    # 4) Μικρό startup safety-net: ξανατρέξε hydration για config/models μετά το πρώτο paint.
+    marker = 'window.__startupModelsRetryPatchInstalled'
+    if marker not in html_doc:
+        runtime_script = r"""
+<script>
+(function () {
+  if (window.__startupModelsRetryPatchInstalled) return;
+  window.__startupModelsRetryPatchInstalled = true;
+
+  async function retryInitialUiHydration() {
+    try {
+      if (typeof window.loadAppConfig === 'function') await window.loadAppConfig();
+    } catch (err) {
+      console.warn('Startup config retry failed:', err);
+    }
+
+    try {
+      if (typeof window.loadModels === 'function') await window.loadModels();
+    } catch (err) {
+      console.warn('Startup models retry failed:', err);
+    }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => {
+      window.setTimeout(retryInitialUiHydration, 0);
+    }, { once: true });
+  } else {
+    window.setTimeout(retryInitialUiHydration, 0);
+  }
+})();
+</script>
+"""
+        if '</body>' in html_doc:
+            html_doc = html_doc.replace('</body>', runtime_script + '\n</body>', 1)
+        else:
+            html_doc += runtime_script
+
+    return html_doc
+def serve_index_html() -> str:
+    """Τελικό index HTML με startup/UI fixes για models, lists και scientific rendering."""
+    return _patch_startup_and_js_escape_issues_in_index_html(_previous_serve_index_html_startup_escape_fix())
+
+
+
+
+_previous_serve_index_html_spacing_fix_v7 = serve_index_html
+
+def _patch_markdown_spacing_in_index_html(html_doc: str) -> str:
+    """Μειώνει τα τεχνητά κενά στην απάντηση ενώ διατηρεί headings/lists/tables/math blocks."""
+    html_doc = str(html_doc or '')
+    if not html_doc:
+        return html_doc
+    if 'markdown-spacing-fix-v7' in html_doc:
+        return html_doc
+
+    runtime_script = r"""
+<script id="markdown-spacing-fix-v7">
+(function () {
+  function installPatch() {
+    if (window.__markdownSpacingFixInstalled) return;
+    window.__markdownSpacingFixInstalled = true;
+
+    markdownToHtml = function markdownToHtmlPatched(rawText) {
+      const protectedMath = (typeof protectDisplayMathBlocks === 'function')
+        ? protectDisplayMathBlocks(rawText)
+        : { text: String(rawText || ''), blocks: [] };
+      const lines = String(protectedMath.text || '').split("\n");
+      const out = [];
+      let inUl = false, inOl = false, inBq = false;
+      let paragraphBuffer = [];
+
+      const closeUl = () => { if (inUl) { out.push("</ul>"); inUl = false; } };
+      const closeOl = () => { if (inOl) { out.push("</ol>"); inOl = false; } };
+      const closeBq = () => { if (inBq) { out.push("</blockquote>"); inBq = false; } };
+      const closeLists = () => { closeUl(); closeOl(); };
+      const flushParagraph = () => {
+        if (!paragraphBuffer.length) return;
+        const merged = paragraphBuffer
+          .map((line) => String(line || '').trim())
+          .filter(Boolean)
+          .join(' ')
+          .replace(/\s{2,}/g, ' ')
+          .trim();
+        paragraphBuffer = [];
+        if (merged) out.push(`<p class="md-p">${inlineMarkdown(merged)}</p>`);
+      };
+
+      for (let i = 0; i < lines.length; i += 1) {
+        const line = String(lines[i] || '');
+        const nextLine = i + 1 < lines.length ? String(lines[i + 1] || '') : '';
+        const trimmed = line.trim();
+        const mathMatch = trimmed.match(/^@@DISPLAY_MATH_(\d+)@@$/);
+
+        if (mathMatch) {
+          flushParagraph();
+          closeLists();
+          closeBq();
+          const mathSource = protectedMath.blocks[Number(mathMatch[1])] || '';
+          out.push(`<div class="math-display-raw">${escapeHtml(mathSource)}</div>`);
+          continue;
+        }
+
+        if (trimmed && line.includes('|') && isMarkdownTableSeparator(nextLine)) {
+          flushParagraph();
+          closeLists();
+          closeBq();
+          const bodyLines = [];
+          let j = i + 2;
+          while (j < lines.length) {
+            const candidate = String(lines[j] || '');
+            if (!candidate.trim() || !candidate.includes('|')) break;
+            bodyLines.push(candidate);
+            j += 1;
+          }
+          out.push(renderMarkdownTable(line, nextLine, bodyLines));
+          i = j - 1;
+          continue;
+        }
+
+        const hm = line.match(/^(#{1,6})\s+(.*)/);
+        if (hm) {
+          flushParagraph();
+          closeLists();
+          closeBq();
+          const lvl = hm[1].length;
+          out.push(`<h${lvl} class="md-h${lvl}">${inlineMarkdown(hm[2])}</h${lvl}>`);
+          continue;
+        }
+
+        if (/^(\s*[-*_]){3,}\s*$/.test(line) && trimmed.length >= 3) {
+          flushParagraph();
+          closeLists();
+          closeBq();
+          out.push('<hr class="md-hr" />');
+          continue;
+        }
+
+        const bm = line.match(/^>\s?(.*)/);
+        if (bm) {
+          flushParagraph();
+          closeLists();
+          if (!inBq) { out.push('<blockquote class="md-bq">'); inBq = true; }
+          out.push(`<p>${inlineMarkdown(bm[1])}</p>`);
+          continue;
+        }
+        closeBq();
+
+        const um = line.match(/^[-*+]\s+(.*)/);
+        if (um) {
+          flushParagraph();
+          closeOl();
+          if (!inUl) { out.push('<ul class="md-list">'); inUl = true; }
+          out.push(`<li>${inlineMarkdown(um[1])}</li>`);
+          continue;
+        }
+
+        const om = line.match(/^\d+\.\s+(.*)/);
+        if (om) {
+          flushParagraph();
+          closeUl();
+          if (!inOl) { out.push('<ol class="md-list">'); inOl = true; }
+          out.push(`<li>${inlineMarkdown(om[1])}</li>`);
+          continue;
+        }
+
+        closeLists();
+
+        if (!trimmed) {
+          flushParagraph();
+          continue;
+        }
+
+        paragraphBuffer.push(line);
+      }
+
+      flushParagraph();
+      closeLists();
+      closeBq();
+      return out.join("\n");
+    };
+
+    window.markdownToHtml = markdownToHtml;
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', installPatch, { once: true });
+  } else {
+    installPatch();
+  }
+})();
+</script>
+"""
+
+    if '</body>' in html_doc:
+        html_doc = html_doc.replace('</body>', runtime_script + '\n</body>', 1)
+    else:
+        html_doc += runtime_script
+    return html_doc
+
+
+def serve_index_html() -> str:
+    """Τελικό index HTML με fix για τεχνητά κενά στις απαντήσεις."""
+    return _patch_markdown_spacing_in_index_html(_previous_serve_index_html_spacing_fix_v7())
+
 
 if __name__ == '__main__':
     main()
