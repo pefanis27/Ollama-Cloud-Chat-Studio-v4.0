@@ -5627,21 +5627,23 @@ def serve_index_html() -> str:
     }
     .reasoning-body {
       margin: 0;
-      max-height: 220px;
+      max-height: 280px;
       overflow-y: auto;
-      white-space: pre-wrap;
+      white-space: normal;
       word-break: break-word;
-      font-family: var(--mono);
+      font-family: var(--sans);
       font-size: 0.87rem;
-      line-height: 1.56;
+      line-height: 1.62;
       color: #c9d9f3;
       background: rgba(2,6,23,0.34);
       border: 1px solid rgba(148,163,184,0.10);
       border-radius: 14px;
-      padding: 12px 14px;
+      padding: 12px 16px;
       scrollbar-width: thin;
       scrollbar-color: rgba(94,234,212,0.22) transparent;
     }
+    .reasoning-body p { margin: 0 0 4px; }
+    .reasoning-body .math-display-raw, .reasoning-body .katex-display { overflow-x: auto; }
     .reasoning-body::-webkit-scrollbar { width: 6px; }
     .reasoning-body::-webkit-scrollbar-thumb {
       background: rgba(94,234,212,0.24); border-radius: 99px;
@@ -6688,7 +6690,7 @@ def serve_index_html() -> str:
           </div>
           <button class="secondary reasoning-toggle-btn" id="toggleReasoningBtn" title="Εμφάνιση ή απόκρυψη του panel σκέψης">🙈 Απόκρυψη</button>
         </div>
-        <pre class="reasoning-body" id="reasoningContent"></pre>
+        <div class="reasoning-body" id="reasoningContent"></div>
       </div>
 
       <div class="messages-wrap">
@@ -8105,7 +8107,19 @@ def serve_index_html() -> str:
       summary.appendChild(icon); summary.appendChild(label); summary.appendChild(chev);
 
       const body = document.createElement("div");
-      body.className = "thinking-body"; body.textContent = content;
+      body.className = "thinking-body";
+      // Render markdown + math in thinking block
+      if (typeof markdownToHtml === "function") {
+        body.innerHTML = markdownToHtml(content);
+      } else {
+        body.textContent = content;
+      }
+      if (complete && typeof renderMathInElementSafe === "function") {
+        renderMathInElementSafe(body);
+      } else if (typeof renderMathInElementSafe === "function") {
+        // During streaming: light debounce
+        setTimeout(function () { renderMathInElementSafe(body); }, 250);
+      }
 
       details.appendChild(summary); details.appendChild(body);
 
@@ -8256,7 +8270,7 @@ def serve_index_html() -> str:
       state.currentInlineThinkingOpen = true;
       state.reasoningStreamCompleted = false;
       if (hide) state.reasoningPanelVisible = false;
-      if (els.reasoningContent) els.reasoningContent.textContent = "";
+      if (els.reasoningContent) els.reasoningContent.innerHTML = "";
       if (els.reasoningMeta) els.reasoningMeta.textContent = "Αναμονή για thinking stream…";
       if (els.reasoningPanel) els.reasoningPanel.classList.remove("streaming");
       if (hide && els.reasoningPanel) els.reasoningPanel.classList.remove("visible");
@@ -8277,7 +8291,27 @@ def serve_index_html() -> str:
       }
 
       if (els.reasoningContent) {
-        els.reasoningContent.textContent = safeText;
+        // Render markdown + math, not raw text
+        if (typeof markdownToHtml === "function") {
+          els.reasoningContent.innerHTML = markdownToHtml(safeText);
+        } else {
+          els.reasoningContent.textContent = safeText;
+        }
+        // Render math symbols (debounced to avoid blocking)
+        if (!streaming || complete) {
+          // On completion: render immediately
+          if (typeof renderMathInElementSafe === "function")
+            renderMathInElementSafe(els.reasoningContent);
+        } else {
+          // During streaming: debounce at 300ms
+          if (els.reasoningContent._mathTimer)
+            clearTimeout(els.reasoningContent._mathTimer);
+          els.reasoningContent._mathTimer = setTimeout(function () {
+            els.reasoningContent._mathTimer = 0;
+            if (typeof renderMathInElementSafe === "function")
+              renderMathInElementSafe(els.reasoningContent);
+          }, 300);
+        }
         els.reasoningContent.scrollTop = els.reasoningContent.scrollHeight;
       }
 
@@ -8305,7 +8339,7 @@ def serve_index_html() -> str:
       }
     }
 
-    const STREAM_RENDER_MIN_INTERVAL_MS = 95;
+    const STREAM_RENDER_MIN_INTERVAL_MS = 30; // 30ms: near-instant text per chunk
     // Πόσο συχνά (ms) να τρέχει το math render ΚΑΤΑ ΤΗ ΔΙΑΡΚΕΙΑ streaming.
     // Αρκετά αραιό ώστε να μην φράξει το MathJax/KaTeX queue, αρκετά πυκνό
     // ώστε ο χρήστης να βλέπει τους συμβολισμούς real-time.
@@ -14806,287 +14840,124 @@ def _patch_stable_live_scientific_streaming_in_index_html(html_doc: str) -> str:
         return html_doc
 
     runtime_script = r"""
-<script id="stable-live-scientific-streaming-patch-v1">
+<script id="stable-live-scientific-streaming-patch-v2">
 (function () {
-  function installPatch() {
-    if (window.__stableLiveScientificStreamingPatchInstalled) return;
-    window.__stableLiveScientificStreamingPatchInstalled = true;
+  if (window.__stableLiveScientificStreamingPatchInstalled) return;
+  window.__stableLiveScientificStreamingPatchInstalled = true;
 
-    if (!document.getElementById('stable-live-scientific-streaming-style')) {
-      const style = document.createElement('style');
-      style.id = 'stable-live-scientific-streaming-style';
-      style.textContent = `
-.live-render-staging-host {
-  position: fixed;
-  left: -200vw;
-  top: 0;
-  width: min(1100px, 92vw);
-  visibility: hidden;
-  pointer-events: none;
-  opacity: 0;
-  z-index: -2147483647;
-  contain: layout style paint;
-}
-.msg-body .assistant-live-preview,
-.assistant-print-body .assistant-live-preview,
-.assistant-print-prompt-body .assistant-live-preview {
-  min-width: 0;
-}
-.msg-body .assistant-live-preview[data-stable-render-ready="1"] {
-  will-change: contents;
-}
-.msg-body .assistant-live-preview mjx-container,
-.msg-body .assistant-live-preview .katex,
-.msg-body .assistant-live-preview math {
-  text-rendering: geometricPrecision;
-  -webkit-font-smoothing: antialiased;
-  font-synthesis-weight: none;
-}
-      `.trim();
-      document.head.appendChild(style);
-    }
+  // CSS for math elements in live preview
+  if (!document.getElementById("stable-live-sci-style")) {
+    var st = document.createElement("style");
+    st.id = "stable-live-sci-style";
+    st.textContent = [
+      ".msg-body .assistant-live-preview mjx-container,",
+      ".msg-body .assistant-live-preview .katex,",
+      ".msg-body .assistant-live-preview math {",
+      "  text-rendering: geometricPrecision;",
+      "  -webkit-font-smoothing: antialiased;",
+      "}"
+    ].join("\n");
+    document.head.appendChild(st);
+  }
 
-    const stableStreamState = new WeakMap();
+  // Per-container state
+  var _map = typeof WeakMap !== "undefined" ? new WeakMap() : null;
+  function _st(el) {
+    if (!_map) return {};
+    var s = _map.get(el);
+    if (!s) { s = { ver: 0, mt: 0, lv: -1 }; _map.set(el, s); }
+    return s;
+  }
 
-    function getStableState(container) {
-      let entry = stableStreamState.get(container);
-      if (!entry) {
-        entry = {
-          version: 0,
-          timer: 0,
-          inFlight: false,
-          lastSwapText: '',
-          pendingText: '',
-          lastRequestTs: 0,
-        };
-        stableStreamState.set(container, entry);
+  // Debounced async math renderer -- never blocks text display
+  function _doMath(preview) {
+    // Preprocess math-display-raw divs
+    try {
+      var divs = preview.querySelectorAll(".math-display-raw:not([data-mp])");
+      for (var i = 0; i < divs.length; i++) {
+        divs[i].setAttribute("data-mp", "1");
+        var t = (divs[i].textContent || "").trim();
+        if (t) divs[i].textContent = t;
       }
-      return entry;
+    } catch (_) {}
+    // MathJax: fire-and-forget
+    if (window.MathJax && typeof window.MathJax.typesetPromise === "function") {
+      Promise.resolve()
+        .then(function () {
+          if (window.MathJax.startup && window.MathJax.startup.promise)
+            return window.MathJax.startup.promise;
+        })
+        .then(function () { return window.MathJax.typesetPromise([preview]); })
+        .catch(function () {});
+      return;
     }
-
-    function getStagingHost() {
-      let host = document.getElementById('liveRenderStagingHost');
-      if (!host) {
-        host = document.createElement('div');
-        host.id = 'liveRenderStagingHost';
-        host.className = 'live-render-staging-host';
-        (document.body || document.documentElement).appendChild(host);
-      }
-      return host;
-    }
-
-    function countMatches(text, pattern) {
-      const m = String(text || '').match(pattern);
-      return m ? m.length : 0;
-    }
-
-    function hasLikelyIncompleteScientificMarkup(sourceText) {
-      const text = String(sourceText || '');
-      if (!text) return false;
-      const withoutEscapedDollars = text.replace(/\\\$/g, '');
-      const doubleDollarCount = countMatches(withoutEscapedDollars, /\$\$/g);
-      const singleDollarRemainder = withoutEscapedDollars.replace(/\$\$/g, '');
-      const singleDollarCount = countMatches(singleDollarRemainder, /\$/g);
-      if ((doubleDollarCount % 2) !== 0) return true;
-      if ((singleDollarCount % 2) !== 0) return true;
-      if (countMatches(text, /\\\(/g) !== countMatches(text, /\\\)/g)) return true;
-      if (countMatches(text, /\\\[/g) !== countMatches(text, /\\\]/g)) return true;
-      const beginCount = countMatches(text, /\\begin\{[A-Za-z*]+\}/g);
-      const endCount = countMatches(text, /\\end\{[A-Za-z*]+\}/g);
-      if (beginCount != endCount) return true;
-      return false;
-    }
-
-    async function renderMathOffscreen(staging, sourceText) {
-      // ── Fast-path: αν δεν υπάρχουν επιστημονικά σύμβολα, skip ──────────────
-      const hasScience = typeof window.mayContainScientificMarkup === 'function'
-        ? !!window.mayContainScientificMarkup(sourceText)
-        : sourceText.indexOf('$') !== -1 || sourceText.indexOf('\\begin{') !== -1;
-      if (!hasScience) return true;
-
-      // ── ΚΡΙΣΙΜΟ: ΔΕΝ ελέγχουμε hasLikelyIncompleteScientificMarkup ──────────
-      // Λόγος: κατά το streaming το raw sourceText είναι ΠΑΝΤΑ "incomplete"
-      // (ανοιχτά $, $$, \[). Αυτό μπλόκαρε κάθε render πριν το τέλος stream.
-      // Αντίθετα, αφήνουμε KaTeX/MathJax να τρέξουν στο PROCESSED staging div
-      // όπου τα complete $$ blocks βρίσκονται ήδη σε .math-display-raw divs.
-      // Τα ημιτελή blocks στο τέλος παραμένουν ως raw text (throwOnError:false).
-
-      // Προεπεξεργασία .math-display-raw divs (unescaping για KaTeX/MathJax)
-      if (typeof window._preprocessMathDisplayRaw === 'function') {
-        window._preprocessMathDisplayRaw(staging);
-      } else {
-        // Fallback inline preprocessing
-        try {
-          const divs = staging.querySelectorAll('.math-display-raw:not([data-math-preprocessed])');
-          divs.forEach(function(div) {
-            div.setAttribute('data-math-preprocessed', '1');
-            const raw = (div.textContent || '').trim();
-            if (raw) div.textContent = raw;
-          });
-        } catch(_) {}
-      }
-
-      // ── MathJax (προτεραιότητα αν φορτωμένο) ────────────────────────────────
-      if (window.MathJax && typeof window.MathJax.typesetPromise === 'function') {
-        try {
-          // Αν υπάρχει pending queue, τελειώνουμε πρώτα
-          if (window.MathJax.startup && window.MathJax.startup.promise) {
-            await window.MathJax.startup.promise;
-          }
-          await window.MathJax.typesetPromise([staging]);
-          return true;
-        } catch (err) {
-          // MathJax μπορεί να κάνει throw για ημιτελή blocks — το αγνοούμε
-          if (String(err).indexOf('Unknown character') === -1) {
-            console.warn('Stable offscreen MathJax render:', err);
-          }
-          // Fallthrough στο KaTeX
-        }
-      }
-
-      // ── KaTeX fallback ───────────────────────────────────────────────────────
-      if (typeof window.renderMathInElement === 'function') {
-        try {
-          window.renderMathInElement(staging, {
-            delimiters: [
-              { left: '$$', right: '$$', display: true },
-              { left: '\\[', right: '\\]', display: true },
-              { left: '$', right: '$', display: false },
-              { left: '\\(', right: '\\)', display: false },
-            ],
-            throwOnError: false,   // ημιτελή blocks → raw text, όχι exception
-            strict: false,         // χαλαρός parser για streaming fragments
-            ignoredTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'],
-            ignoredClasses: ['code-inline', 'code-block', 'code-pre'],
-            // KaTeX macros — ίδια με renderMathInElementSafe
-            macros: {
-              '\\\\grad':    '\\\\nabla',
-              '\\\\curl':    '\\\\nabla \\\\times',
-              '\\\\div':     '\\\\nabla \\\\cdot',
-              '\\\\laplacian': '\\\\nabla^2',
-              '\\\\ohm':     '\\\\Omega',
-              '\\\\Var':     '\\\\mathrm{Var}',
-              '\\\\Cov':     '\\\\mathrm{Cov}',
-              '\\\\Corr':    '\\\\mathrm{Corr}',
-              '\\\\abs':     '\\\\left\\\\lvert #1 \\\\right\\\\rvert',
-              '\\\\norm':    '\\\\left\\\\lVert #1 \\\\right\\\\rVert',
-            },
-          });
-          return true;
-        } catch (err) {
-          // Αγνοούμε gracefully — το κείμενο παραμένει raw
-          console.warn('Stable offscreen KaTeX render:', err);
-          return false;
-        }
-      }
-      return false;
-    }
-
-    function moveChildren(source, target) {
-      const frag = document.createDocumentFragment();
-      while (source.firstChild) {
-        frag.appendChild(source.firstChild);
-      }
-      target.replaceChildren(frag);
-    }
-
-    async function buildStableStreamingPreview(container, sourceText, versionToken) {
-      const host = getStagingHost();
-      const staging = document.createElement('div');
-      staging.className = 'assistant-live-preview stable-render-staging';
-      staging.dataset.rawContent = String(sourceText || '');
-      host.appendChild(staging);
-
+    // KaTeX fallback
+    if (typeof window.renderMathInElement === "function") {
       try {
-        if (typeof window.renderMessageContent === 'function') {
-          window.renderMessageContent(staging, sourceText, {
-            skipMathRender: true,   // DOM γρήγορα, χωρίς math render εδώ
-            liveMathPreview: false,
-            forceStreamingPreview: true,
-          });
-        } else {
-          staging.textContent = String(sourceText || '');
-        }
-
-        // ΚΡΙΣΙΜΟ: Προεπεξεργασία .math-display-raw divs πριν το KaTeX/MathJax.
-        // Το renderMessageContent έχει ήδη χωρίσει τα complete $$ blocks σε
-        // .math-display-raw divs. Τα ημιτελή blocks παραμένουν σε <p> tags.
-        if (typeof window._preprocessMathDisplayRaw === 'function') {
-          window._preprocessMathDisplayRaw(staging);
-        }
-
-        await renderMathOffscreen(staging, sourceText);
-
-        const liveState = getStableState(container);
-        if ((liveState.version || 0) !== versionToken) return;
-
-        const previewNode = typeof window.ensureAssistantStreamingPreviewNode === 'function'
-          ? window.ensureAssistantStreamingPreviewNode(container)
-          : container;
-        if (!previewNode) return;
-
-        previewNode.dataset.rawContent = String(sourceText || '');
-        previewNode.dataset.stableRenderReady = '1';
-        moveChildren(staging, previewNode);
-
-        if (typeof window.schedulePrismHighlightInContainer === 'function') {
-          window.schedulePrismHighlightInContainer(previewNode);
-        }
-      } finally {
-        staging.remove();
-      }
-    }
-
-    function scheduleStableStreamingPreview(container, sourceText, options) {
-      if (!container) return String(sourceText || '');
-      const liveState = getStableState(container);
-      liveState.pendingText = String(sourceText || '');
-      liveState.version = ((liveState.version || 0) + 1) | 0;
-      const myVersion = liveState.version;
-      const now = Date.now();
-      const minInterval = Math.max(90, Number((options && options.liveMathIntervalMs) || 140));
-      const elapsed = now - Number(liveState.lastRequestTs || 0);
-      liveState.lastRequestTs = now;
-
-      if (liveState.timer) {
-        clearTimeout(liveState.timer);
-        liveState.timer = 0;
-      }
-
-      const delay = Math.max(0, minInterval - Math.min(elapsed, minInterval));
-      liveState.timer = window.setTimeout(() => {
-        liveState.timer = 0;
-        buildStableStreamingPreview(container, liveState.pendingText, myVersion).catch((err) => {
-          console.warn('Stable streaming preview failed:', err);
+        window.renderMathInElement(preview, {
+          delimiters: [
+            { left: "$$", right: "$$", display: true },
+            { left: "\\[", right: "\\]", display: true },
+            { left: "$",  right: "$",  display: false },
+            { left: "\\(", right: "\\)", display: false }
+          ],
+          throwOnError: false,
+          strict: false,
+          ignoredTags: ["script","noscript","style","textarea","pre","code"],
+          ignoredClasses: ["code-inline","code-block","code-pre"]
         });
-      }, delay);
-      stableStreamState.set(container, liveState);
-      return liveState.pendingText;
+      } catch (_) {}
+    }
+  }
+
+  function _scheduleMath(container, ver) {
+    var s = _st(container);
+    if (s.mt) { clearTimeout(s.mt); s.mt = 0; }
+    s.mt = setTimeout(function () {
+      s.mt = 0;
+      if (s.ver !== ver) return; // newer update came in
+      if (s.lv === ver) return;  // already rendered this version
+      s.lv = ver;
+      var preview = container.querySelector(".assistant-live-preview") || container;
+      if (preview) _doMath(preview);
+    }, 120);
+  }
+
+  // Override: IMMEDIATE text render + ASYNC math
+  window.updateAssistantStreamingPreview = function (container, content) {
+    var text = String(content || "");
+    if (!container) return text;
+    container.dataset.rawContent = text;
+    var s = _st(container);
+    s.ver = (s.ver + 1) | 0;
+    var myVer = s.ver;
+
+    // Step 1: instant DOM update without math (zero latency)
+    if (typeof window.renderMessageContent === "function") {
+      window.renderMessageContent(container, text, {
+        skipMathRender: true,
+        liveMathPreview: false,
+        forceStreamingPreview: true
+      });
+    } else {
+      var node = container.querySelector(".assistant-live-preview") || container;
+      if (node) node.textContent = text;
     }
 
-    window.updateAssistantStreamingPreview = function updateAssistantStreamingPreviewStable(container, content) {
-      const sourceText = String(content || '');
-      if (!container) return sourceText;
-      container.dataset.rawContent = sourceText;
-      // Χρησιμοποιούμε το STREAM_LIVE_MATH_INTERVAL_MS αν είναι ορισμένο (200ms)
-      // αλλιώς fallback στα 140ms για ακόμα καλύτερο real-time rendering
-      const intervalMs = (typeof STREAM_LIVE_MATH_INTERVAL_MS !== 'undefined')
-        ? Math.min(STREAM_LIVE_MATH_INTERVAL_MS, 200)
-        : 140;
-      scheduleStableStreamingPreview(container, sourceText, {
-        liveMathIntervalMs: intervalMs,
-      });
-      return sourceText;
-    };
-  }
+    // Step 2: async math -- 120ms debounce, never blocks text
+    var hasSci = typeof window.mayContainScientificMarkup === "function"
+      ? window.mayContainScientificMarkup(text)
+      : text.indexOf("$") !== -1;
+    if (hasSci) _scheduleMath(container, myVer);
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', installPatch, { once: true });
-  } else {
-    installPatch();
-  }
+    if (typeof window.schedulePrismHighlightInContainer === "function")
+      window.schedulePrismHighlightInContainer(container);
+
+    return text;
+  };
 })();
 </script>
+
 """
     if '</body>' in html_doc:
         html_doc = html_doc.replace('</body>', runtime_script + '\n</body>', 1)
