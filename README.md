@@ -1,4 +1,4 @@
-# ☁️ Ollama Cloud Chat Studio v4.0 (update)
+# ☁️ Ollama Cloud Chat Studio v4.0
 
 Ένα browser-based studio συνομιλίας για **Ollama Cloud** με ενσωματωμένο HTTP server, streaming απαντήσεις, υποστήριξη αρχείων, prompt profiles, visualization engine, dual-model ensemble και εξαγωγή απαντήσεων σε **Markdown, PDF και Docx**.
 
