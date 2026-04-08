@@ -66,6 +66,16 @@ PACKAGE_CATALOG: Dict[str, PackageSpec] = {
         import_name="PIL",
         description="Μετατροπή/κανονικοποίηση εικόνων πριν την ενσωμάτωση στο DOCX.",
     ),
+    "matplotlib": PackageSpec(
+        pip_name="matplotlib",
+        import_name="matplotlib",
+        description="Python plotting engine για charts, scientific plots και δυναμικά γραφήματα της εφαρμογής.",
+    ),
+    "mpl_toolkits": PackageSpec(
+        pip_name="matplotlib",
+        import_name="mpl_toolkits",
+        description="Εργαλεία του matplotlib για advanced plotting helpers όπως axes, toolkits και 3D υποσυστήματα.",
+    ),
     "cairosvg": PackageSpec(
         pip_name="CairoSVG",
         import_name="cairosvg",
@@ -114,20 +124,9 @@ STD_LIB_FALLBACK = {
     "xml",
 }
 
-SOURCE_CANDIDATE_PATTERNS = [
-    "Ollama_cloud_chat_Browser*.py",
-    "Ollama_Cloud_Chat_Studio*.py",
-]
-SOURCE_EXCLUDE_NAMES = {
-    "build_ollama_cloud_chat_studio_exe.py",
-    "install_ollama_cloud_chat_studio_packages.py",
-    "build_ollama_cloud_chat_studio_exe_fixed.py",
-    "install_ollama_cloud_chat_studio_packages_fixed.py",
-    "build_ollama_cloud_chat_studio_exe_fixed_v2.py",
-    "install_ollama_cloud_chat_studio_packages_fixed_v2.py",
-    "build_ollama_cloud_chat_studio_exe_fixed_v3.py",
-    "install_ollama_cloud_chat_studio_packages_fixed_v3.py",
-}
+SOURCE_CANDIDATE_PATTERNS = ["Ollama_Cloud_Chat_Studio_v6.py"]
+
+SOURCE_EXCLUDE_NAMES = {"build_ollama_cloud_chat_studio_exe.py"}
 
 
 def _site_package_dirs() -> List[Path]:

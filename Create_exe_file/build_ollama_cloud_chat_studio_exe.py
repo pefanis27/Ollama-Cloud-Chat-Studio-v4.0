@@ -1,16 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Builder για το Ollama Cloud Chat Studio.
-
-Τι κάνει:
-- Εντοπίζει αυτόματα το κύριο source αρχείο αν δεν δοθεί ρητά.
-- Αναλύει τα imports του source και βρίσκει third-party dependencies.
-- Εγκαθιστά ό,τι λείπει από τα γνωστά dependencies της εφαρμογής.
-- Τρέχει PyInstaller για GUI executable χωρίς κονσόλα και χωρίς UPX.
-- Κάνει στοχευμένο bundling για PDF/DOCX export χωρίς θορυβώδη warnings από optional/native πακέτα.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -18,6 +8,7 @@ import ast
 import importlib.metadata
 import importlib.util
 import os
+import re
 import shutil
 import site
 import subprocess
@@ -35,10 +26,7 @@ FORCED_EXCLUDES = {
     "cv2",
     "fontTools",
     "jupyter",
-    "matplotlib",
     "notebook",
-    "numpy",
-    "pandas",
     "pygame",
     "qt_material",
     "requests",
@@ -49,7 +37,6 @@ FORCED_EXCLUDES = {
     "torchvision",
 }
 
-# Αντιστοίχιση import root -> pip package + κανόνες PyInstaller
 PACKAGE_RULES: Dict[str, Dict[str, object]] = {
     "fitz": {
         "pip": "PyMuPDF",
@@ -57,6 +44,7 @@ PACKAGE_RULES: Dict[str, Dict[str, object]] = {
         "collect_submodules": [],
         "copy_metadata": ["PyMuPDF"],
         "optional": False,
+        "bundle": True,
     },
     "pymupdf": {
         "pip": "PyMuPDF",
@@ -64,6 +52,7 @@ PACKAGE_RULES: Dict[str, Dict[str, object]] = {
         "collect_submodules": [],
         "copy_metadata": ["PyMuPDF"],
         "optional": False,
+        "bundle": True,
     },
     "pypdf": {
         "pip": "pypdf",
@@ -71,6 +60,7 @@ PACKAGE_RULES: Dict[str, Dict[str, object]] = {
         "collect_submodules": ["pypdf"],
         "copy_metadata": ["pypdf"],
         "optional": False,
+        "bundle": True,
     },
     "docx": {
         "pip": "python-docx",
@@ -78,6 +68,7 @@ PACKAGE_RULES: Dict[str, Dict[str, object]] = {
         "collect_submodules": ["docx", "lxml"],
         "copy_metadata": ["python-docx", "lxml"],
         "optional": False,
+        "bundle": True,
     },
     "lxml": {
         "pip": "lxml",
@@ -85,6 +76,7 @@ PACKAGE_RULES: Dict[str, Dict[str, object]] = {
         "collect_submodules": ["lxml"],
         "copy_metadata": ["lxml"],
         "optional": False,
+        "bundle": True,
     },
     "bs4": {
         "pip": "beautifulsoup4",
@@ -92,6 +84,7 @@ PACKAGE_RULES: Dict[str, Dict[str, object]] = {
         "collect_submodules": ["bs4", "soupsieve"],
         "copy_metadata": ["beautifulsoup4", "soupsieve"],
         "optional": False,
+        "bundle": True,
     },
     "PIL": {
         "pip": "Pillow",
@@ -99,6 +92,7 @@ PACKAGE_RULES: Dict[str, Dict[str, object]] = {
         "collect_submodules": ["PIL"],
         "copy_metadata": ["Pillow"],
         "optional": False,
+        "bundle": True,
     },
     "cairosvg": {
         "pip": "CairoSVG",
@@ -106,6 +100,7 @@ PACKAGE_RULES: Dict[str, Dict[str, object]] = {
         "collect_submodules": [],
         "copy_metadata": ["CairoSVG", "cssselect2", "tinycss2", "defusedxml"],
         "optional": True,
+        "bundle": True,
     },
     "pygments": {
         "pip": "Pygments",
@@ -113,6 +108,44 @@ PACKAGE_RULES: Dict[str, Dict[str, object]] = {
         "collect_submodules": ["pygments"],
         "copy_metadata": ["Pygments"],
         "optional": False,
+        "bundle": True,
+    },
+    "matplotlib": {
+        "pip": "matplotlib",
+        "hidden": [
+            "matplotlib",
+            "matplotlib.pyplot",
+            "matplotlib.backends.backend_agg",
+            "matplotlib.backends.backend_svg",
+        ],
+        "collect_submodules": [],
+        "copy_metadata": ["matplotlib"],
+        "optional": False,
+        "bundle": False,
+    },
+    "mpl_toolkits": {
+        "pip": "matplotlib",
+        "hidden": ["mpl_toolkits", "mpl_toolkits.mplot3d"],
+        "collect_submodules": [],
+        "copy_metadata": ["matplotlib"],
+        "optional": False,
+        "bundle": False,
+    },
+    "numpy": {
+        "pip": "numpy",
+        "hidden": ["numpy"],
+        "collect_submodules": [],
+        "copy_metadata": ["numpy"],
+        "optional": False,
+        "bundle": False,
+    },
+    "pandas": {
+        "pip": "pandas",
+        "hidden": ["pandas"],
+        "collect_submodules": [],
+        "copy_metadata": ["pandas"],
+        "optional": False,
+        "bundle": False,
     },
     "pathlib": {
         "pip": None,
@@ -120,6 +153,7 @@ PACKAGE_RULES: Dict[str, Dict[str, object]] = {
         "collect_submodules": [],
         "copy_metadata": [],
         "optional": False,
+        "bundle": False,
     },
 }
 
@@ -138,6 +172,7 @@ STD_LIB_FALLBACK = {
     "json",
     "logging",
     "math",
+    "multiprocessing",
     "os",
     "pathlib",
     "queue",
@@ -158,19 +193,23 @@ STD_LIB_FALLBACK = {
     "xml",
 }
 
-SOURCE_CANDIDATE_PATTERNS = [
-    "Ollama_cloud_chat_Browser*.py",
+SOURCE_GLOB_PATTERNS = [
+    "Ollama_Cloud_Chat_Studio_v6.py",
+    "Ollama_Cloud_Chat_Studio_v*_UPDATED_v*.py",
+    "Ollama_Cloud_Chat_Studio_v*_UPDATED.py",
+    "Ollama_Cloud_Chat_Studio_v*.py",
     "Ollama_Cloud_Chat_Studio*.py",
 ]
 SOURCE_EXCLUDE_NAMES = {
     "build_ollama_cloud_chat_studio_exe.py",
-    "install_ollama_cloud_chat_studio_packages.py",
-    "build_ollama_cloud_chat_studio_exe_fixed.py",
-    "install_ollama_cloud_chat_studio_packages_fixed.py",
-    "build_ollama_cloud_chat_studio_exe_fixed_v2.py",
-    "install_ollama_cloud_chat_studio_packages_fixed_v2.py",
-    "build_ollama_cloud_chat_studio_exe_fixed_v3.py",
-    "install_ollama_cloud_chat_studio_packages_fixed_v3.py",
+    "build_ollama_cloud_chat_studio_exe_UPDATED.py",
+}
+
+RUNTIME_IMPORT_HINTS: Dict[str, Sequence[str]] = {
+    "matplotlib": [r"\bimport\s+matplotlib\b", r"\bfrom\s+matplotlib\b"],
+    "mpl_toolkits": [r"\bfrom\s+mpl_toolkits\b", r"\bimport\s+mpl_toolkits\b"],
+    "numpy": [r"\bimport\s+numpy\b", r"\bfrom\s+numpy\b"],
+    "pandas": [r"\bimport\s+pandas\b", r"\bfrom\s+pandas\b"],
 }
 
 
@@ -179,23 +218,19 @@ def eprint(*parts: object) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Builder για strict minimal GUI executable.")
-    parser.add_argument(
-        "--source",
-        default="",
-        help="Κύριο .py αρχείο. Αν μείνει κενό, γίνεται αυτόματος εντοπισμός.",
+    parser = argparse.ArgumentParser(
+        description="Builder για το Ollama Cloud Chat Studio με έλεγχο source, dependencies και PyInstaller.",
     )
-    parser.add_argument("--name", default="", help="Όνομα executable.")
+    parser.add_argument("--source", default="", help="Κύριο .py αρχείο. Αν μείνει κενό, γίνεται αυτόματος εντοπισμός.")
+    parser.add_argument("--name", default="", help="Όνομα executable. Αν μείνει κενό, χρησιμοποιείται το stem του source.")
     parser.add_argument("--icon", default="", help="Προαιρετικό .ico αρχείο.")
-    parser.add_argument("--onefile", action="store_true", help="Δημιουργία ενός μόνο .exe.")
-    parser.add_argument("--keep-spec", action="store_true", help="Να κρατηθεί το .spec.")
-    parser.add_argument("--no-clean", action="store_true", help="Να μην διαγραφούν build/dist πριν το build.")
+    parser.add_argument("--onefile", action="store_true", help="Δημιουργία ενός μόνο .exe αντί για onedir build.")
+    parser.add_argument("--keep-spec", action="store_true", help="Να κρατηθεί το .spec μετά το build.")
+    parser.add_argument("--no-clean", action="store_true", help="Να μη διαγραφούν build/dist πριν το build.")
     parser.add_argument("--zip", action="store_true", help="Δημιουργία zip του τελικού build.")
-    parser.add_argument(
-        "--skip-auto-install",
-        action="store_true",
-        help="Μην εγκαταστήσεις αυτόματα όσα Python packages λείπουν.",
-    )
+    parser.add_argument("--skip-auto-install", action="store_true", help="Μην εγκαταστήσεις αυτόματα όσα Python packages λείπουν.")
+    parser.add_argument("--with-plot-deps", action="store_true", help="Εγκατάσταση και bundling matplotlib/mpl_toolkits/numpy/pandas όπου εντοπιστούν.")
+    parser.add_argument("--dry-run", action="store_true", help="Εμφάνιση του build plan χωρίς εκτέλεση του PyInstaller.")
     return parser.parse_args()
 
 
@@ -205,17 +240,29 @@ def _site_package_dirs() -> List[Path]:
         if not raw:
             continue
         try:
-            p = Path(raw).resolve()
+            path = Path(raw).resolve()
         except Exception:
             continue
-        if p not in paths:
-            paths.append(p)
+        if path not in paths:
+            paths.append(path)
     return paths
 
 
+def _extract_version_score(filename: str) -> Tuple[int, int]:
+    lowered = filename.lower()
+    updated_match = re.search(r"updated(?:_v(\d+))?", lowered)
+    if updated_match:
+        return (1, int(updated_match.group(1) or "1"))
+    plain_match = re.search(r"_v(\d+)(?:\.py)?$", lowered)
+    if plain_match:
+        return (0, int(plain_match.group(1) or "0"))
+    return (0, 0)
+
+
+# Ο auto-detector προτιμά το πιο πρόσφατο και πιο "κύριο" app αρχείο.
 def autodetect_source(project_root: Path) -> Optional[Path]:
     candidates: List[Path] = []
-    for pattern in SOURCE_CANDIDATE_PATTERNS:
+    for pattern in SOURCE_GLOB_PATTERNS:
         for path in project_root.glob(pattern):
             if not path.is_file():
                 continue
@@ -226,32 +273,38 @@ def autodetect_source(project_root: Path) -> Optional[Path]:
     if not candidates:
         return None
 
-    # Προτίμηση στα πιο πρόσφατα και σε ονόματα που θυμίζουν το βασικό app.
-    candidates = sorted(
+    ranked = sorted(
         set(candidates),
         key=lambda p: (
-            0 if "docx_export" in p.stem.lower() else 1,
-            0 if "browser" in p.stem.lower() else 1,
+            0 if p.name.lower().startswith("ollama_cloud_chat_studio") else 1,
+            0 if "updated" in p.stem.lower() else 1,
+            -_extract_version_score(p.name)[0],
+            -_extract_version_score(p.name)[1],
             -p.stat().st_mtime,
             p.name.lower(),
         ),
     )
-    return candidates[0]
+    return ranked[0]
 
 
 def resolve_source_path(source_arg: str) -> Path:
     if source_arg:
         return Path(source_arg).resolve()
 
-    detected = autodetect_source(Path.cwd())
-    if detected is None:
-        raise FileNotFoundError(
-            "Δεν βρέθηκε αυτόματα source αρχείο. Δώσε ρητά --source <αρχείο.py>."
-        )
-    return detected
+    search_roots = [Path.cwd()]
+    script_dir = Path(__file__).resolve().parent
+    if script_dir not in search_roots:
+        search_roots.append(script_dir)
+
+    for root in search_roots:
+        detected = autodetect_source(root)
+        if detected is not None:
+            return detected
+
+    raise FileNotFoundError("Δεν βρέθηκε αυτόματα source αρχείο. Δώσε ρητά --source <αρχείο.py>.")
 
 
-def validate_input_paths(source: Path, icon: Path | None) -> None:
+def validate_input_paths(source: Path, icon: Optional[Path]) -> None:
     if not source.exists() or not source.is_file():
         raise FileNotFoundError(f"Δεν βρέθηκε το source αρχείο: {source}")
     if source.suffix.lower() != ".py":
@@ -275,10 +328,10 @@ def read_source_text(source: Path) -> str:
     return source.read_text(encoding="utf-8")
 
 
+# Τα AST imports πιάνουν τα πραγματικά imports του app.
 def extract_import_roots(source_text: str) -> Set[str]:
     tree = ast.parse(source_text)
     roots: Set[str] = set()
-
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -287,8 +340,16 @@ def extract_import_roots(source_text: str) -> Set[str]:
         elif isinstance(node, ast.ImportFrom):
             if node.module:
                 roots.add(node.module.split(".", 1)[0])
-
     return roots
+
+
+# Τα runtime hints πιάνουν imports που κρύβονται σε generated scripts/string templates.
+def extract_runtime_hint_roots(source_text: str) -> Set[str]:
+    hinted: Set[str] = set()
+    for root, patterns in RUNTIME_IMPORT_HINTS.items():
+        if any(re.search(pattern, source_text) for pattern in patterns):
+            hinted.add(root)
+    return hinted
 
 
 def is_stdlib_module(module_name: str) -> bool:
@@ -348,7 +409,7 @@ def uninstall_obsolete_pathlib_backport_if_present() -> None:
         raise RuntimeError("Απέτυχε η αφαίρεση του obsolete package 'pathlib'.")
 
 
-def ensure_package_installed(import_name: str, pip_name: str | None = None) -> None:
+def ensure_package_installed(import_name: str, pip_name: Optional[str] = None) -> None:
     try:
         if importlib.util.find_spec(import_name) is not None:
             return
@@ -365,6 +426,7 @@ def ensure_package_installed(import_name: str, pip_name: str | None = None) -> N
 def ensure_pyinstaller_ready() -> None:
     ensure_package_installed("PyInstaller", "pyinstaller")
 
+
 def is_module_importable(module_name: str) -> bool:
     try:
         __import__(module_name)
@@ -373,17 +435,18 @@ def is_module_importable(module_name: str) -> bool:
         return False
 
 
-def should_include_rule(root: str) -> bool:
+def should_include_rule(root: str, with_plot_deps: bool) -> bool:
     rule = PACKAGE_RULES.get(root)
     if not rule:
+        return False
+    if root in {"matplotlib", "mpl_toolkits", "numpy", "pandas"} and not with_plot_deps:
         return False
     if not bool(rule.get("optional", False)):
         return True
     return is_module_importable(root)
 
 
-
-def ensure_detected_dependencies_installed(import_roots: Iterable[str]) -> None:
+def ensure_detected_dependencies_installed(import_roots: Iterable[str], *, with_plot_deps: bool) -> None:
     roots = set(import_roots)
     for root in sorted(roots):
         rule = PACKAGE_RULES.get(root)
@@ -392,38 +455,40 @@ def ensure_detected_dependencies_installed(import_roots: Iterable[str]) -> None:
         pip_name = rule.get("pip")
         if not pip_name:
             continue
+        if root in {"matplotlib", "mpl_toolkits", "numpy", "pandas"} and not with_plot_deps:
+            continue
         if bool(rule.get("optional", False)):
             print(f"Παραλείπεται το optional/native package '{pip_name}' για να αποφευχθούν build προβλήματα από system DLLs.")
             continue
         ensure_package_installed(root, str(pip_name))
 
-    # Το python-docx χρειάζεται το lxml για να λειτουργήσει σωστά μέσα στο .exe.
     if "docx" in roots or "lxml" in roots:
         ensure_package_installed("lxml", "lxml")
 
 
-def gather_pyinstaller_options(import_roots: Sequence[str]) -> Tuple[List[str], List[str]]:
+def gather_pyinstaller_options(import_roots: Sequence[str], *, with_plot_deps: bool) -> Tuple[List[str], List[str]]:
     hiddenimports: List[str] = []
     collect_args: List[str] = []
+    metadata_targets: Set[str] = set()
 
     for root in sorted(set(import_roots)):
         rule = PACKAGE_RULES.get(root)
         if not rule:
             continue
-        if bool(rule.get("optional", False)) and not should_include_rule(root):
+        if not bool(rule.get("bundle", False)) and not should_include_rule(root, with_plot_deps):
+            continue
+        if bool(rule.get("optional", False)) and not is_module_importable(root):
             print(f"Παραλείπεται το optional/native import '{root}' από το bundling γιατί δεν είναι importable στο τρέχον σύστημα.")
             continue
 
         for name in rule.get("hidden", []):
             hiddenimports.append(str(name))
-
         for name in rule.get("collect_submodules", []):
             collect_args.extend(["--collect-submodules", str(name)])
-
         for name in rule.get("copy_metadata", []):
             try:
                 importlib.metadata.distribution(str(name))
-                collect_args.extend(["--copy-metadata", str(name)])
+                metadata_targets.add(str(name))
             except importlib.metadata.PackageNotFoundError:
                 pass
 
@@ -435,12 +500,15 @@ def gather_pyinstaller_options(import_roots: Sequence[str]) -> Tuple[List[str], 
             "concurrent.futures.process",
         ]
     )
-
+    for name in sorted(metadata_targets):
+        collect_args.extend(["--copy-metadata", name])
     return sorted(set(hiddenimports)), collect_args
 
 
-def build_exclude_args(import_roots: Sequence[str]) -> List[str]:
+def build_exclude_args(import_roots: Sequence[str], *, with_plot_deps: bool) -> List[str]:
     imported = set(import_roots)
+    if with_plot_deps:
+        imported.update({"matplotlib", "mpl_toolkits", "numpy", "pandas"})
     excludes: List[str] = []
     for name in sorted(FORCED_EXCLUDES):
         if name not in imported:
@@ -451,7 +519,7 @@ def build_exclude_args(import_roots: Sequence[str]) -> List[str]:
 def build_pyinstaller_command(
     source: Path,
     app_name: str,
-    icon: Path | None,
+    icon: Optional[Path],
     onefile: bool,
     hiddenimports: Sequence[str],
     collect_args: Sequence[str],
@@ -468,15 +536,11 @@ def build_pyinstaller_command(
         "--name",
         app_name,
     ]
-
     cmd.append("--onefile" if onefile else "--onedir")
-
     if icon is not None:
         cmd.extend(["--icon", str(icon)])
-
     for mod in hiddenimports:
         cmd.extend(["--hidden-import", mod])
-
     cmd.extend(collect_args)
     cmd.extend(exclude_args)
     cmd.append(str(source))
@@ -501,27 +565,54 @@ def zip_output(project_root: Path, app_name: str, onefile: bool) -> Path:
     return Path(shutil.make_archive(str(archive_base), "zip", root_dir=str(target.parent), base_dir=target.name))
 
 
+# Οι σημειώσεις αυτές λένε καθαρά τι λύνει ο builder και τι εξαρτάται ακόμα από runtime Python.
+def detect_capabilities(source_text: str) -> List[str]:
+    notes: List[str] = []
+    if "resolve_python_for_generated_scripts" in source_text:
+        notes.append(
+            "Το app εκτελεί generated Python scripts μέσω εξωτερικού interpreter όταν είναι packaged. "
+            "Το .exe δουλεύει κανονικά, αλλά τα >Run / plot features χρειάζονται διαθέσιμο Python στο target μηχάνημα."
+        )
+    if "OLLAMA_PLOT_OUTPUT" in source_text or "matplotlib" in source_text:
+        notes.append(
+            "Εντοπίστηκε plotting/runtime λογική. Με --with-plot-deps εγκαθίστανται και δένονται τα plot dependencies στο build περιβάλλον, "
+            "όμως αυτό δεν υποκαθιστά τον εξωτερικό Python interpreter που ψάχνει το app στο packaged mode."
+        )
+    if "fitz" in source_text or "from docx" in source_text or "pypdf" in source_text:
+        notes.append("Εντοπίστηκε stack export PDF/DOCX και ο builder το υποστηρίζει ρητά με hidden imports και metadata rules.")
+    return notes
+
+
 def print_summary(
     source: Path,
     app_name: str,
+    direct_roots: Sequence[str],
+    hinted_roots: Sequence[str],
     third_party: Sequence[str],
     hiddenimports: Sequence[str],
     onefile: bool,
     exclude_args: Sequence[str],
+    capability_notes: Sequence[str],
 ) -> None:
     excluded_modules = [exclude_args[i + 1] for i, item in enumerate(exclude_args[:-1]) if item == "--exclude-module"]
-    print("=" * 78)
-    print("Builder για strict minimal executable")
-    print("=" * 78)
-    print(f"Source          : {source.name}")
-    print(f"App name        : {app_name}")
-    print(f"Build mode      : {'onefile' if onefile else 'onedir'}")
-    print("Console         : disabled (GUI / χωρίς terminal)")
-    print("UPX             : disabled")
-    print(f"Third-party     : {', '.join(third_party) if third_party else 'κανένα'}")
-    print(f"Hidden imports  : {', '.join(hiddenimports) if hiddenimports else 'κανένα'}")
-    print(f"Excludes        : {', '.join(excluded_modules) if excluded_modules else 'κανένα'}")
-    print("=" * 78)
+    print("=" * 86)
+    print("Builder για Ollama Cloud Chat Studio")
+    print("=" * 86)
+    print(f"Source              : {source.name}")
+    print(f"App name            : {app_name}")
+    print(f"Build mode          : {'onefile' if onefile else 'onedir'}")
+    print("Console             : disabled (GUI / χωρίς terminal)")
+    print("UPX                 : disabled")
+    print(f"Direct imports      : {', '.join(direct_roots) if direct_roots else 'κανένα'}")
+    print(f"Runtime hints       : {', '.join(hinted_roots) if hinted_roots else 'κανένα'}")
+    print(f"Third-party         : {', '.join(third_party) if third_party else 'κανένα'}")
+    print(f"Hidden imports      : {', '.join(hiddenimports) if hiddenimports else 'κανένα'}")
+    print(f"Excludes            : {', '.join(excluded_modules) if excluded_modules else 'κανένα'}")
+    if capability_notes:
+        print("Notes               :")
+        for note in capability_notes:
+            print(f"  - {note}")
+    print("=" * 86)
 
 
 def main() -> int:
@@ -533,7 +624,6 @@ def main() -> int:
 
     project_root = source.parent
     os.chdir(project_root)
-
     app_name = args.name.strip() or source.stem
 
     if not args.no_clean:
@@ -543,22 +633,28 @@ def main() -> int:
     ensure_pyinstaller_ready()
 
     source_text = read_source_text(source)
-    import_roots = extract_import_roots(source_text)
-    third_party = detect_third_party_roots(import_roots)
+    direct_roots = sorted(extract_import_roots(source_text))
+    hinted_roots = sorted(extract_runtime_hint_roots(source_text))
+    all_roots = sorted(set(direct_roots) | set(hinted_roots))
+    third_party = detect_third_party_roots(all_roots)
+    capability_notes = detect_capabilities(source_text)
 
     if not args.skip_auto_install:
-        ensure_detected_dependencies_installed(third_party)
+        ensure_detected_dependencies_installed(third_party, with_plot_deps=args.with_plot_deps)
 
-    hiddenimports, collect_args = gather_pyinstaller_options(import_roots)
-    exclude_args = build_exclude_args(import_roots)
+    hiddenimports, collect_args = gather_pyinstaller_options(all_roots, with_plot_deps=args.with_plot_deps)
+    exclude_args = build_exclude_args(all_roots, with_plot_deps=args.with_plot_deps)
 
     print_summary(
         source=source,
         app_name=app_name,
+        direct_roots=direct_roots,
+        hinted_roots=hinted_roots,
         third_party=third_party,
         hiddenimports=hiddenimports,
         onefile=args.onefile,
         exclude_args=exclude_args,
+        capability_notes=capability_notes,
     )
 
     cmd = build_pyinstaller_command(
@@ -573,6 +669,10 @@ def main() -> int:
 
     print("Εκτέλεση:")
     print(" ".join(f'"{part}"' if " " in part else part for part in cmd))
+
+    if args.dry_run:
+        print("\nDRY RUN: Δεν εκτελέστηκε το PyInstaller.")
+        return 0
 
     result = subprocess.run(cmd)
     if result.returncode != 0:
